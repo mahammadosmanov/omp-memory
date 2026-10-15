@@ -3,6 +3,9 @@ import { MEMORY_TYPES, type MemoryRecord, type MemoryStatus, type MemoryProvenan
 
 const fields = new Set(["id", "type", "createdAt", "updatedAt", "provenance", "confidence", "status"]);
 const idPattern = /^mem_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export function isMemoryNoteFilename(filename: string): boolean {
+  return filename.endsWith(".md") && idPattern.test(filename.slice(0, -3));
+}
 function fail(message: string): never { throw new Error(`Invalid memory note: ${message}`); }
 function validDate(value: unknown): value is string { return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
 

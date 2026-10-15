@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { parseMemoryNote, serializeMemoryNote } from "./note-codec";
-import type { MemoryRecord, VaultStore } from "./types";
+import { isMemoryNoteFilename, parseMemoryNote, serializeMemoryNote } from "./note-codec";
+import { MEMORY_TYPES, type MemoryRecord, type VaultStore } from "./types";
 
 export function createVaultStore(rootDir: string): VaultStore {
   const root = resolve(rootDir);
@@ -29,37 +29,50 @@ export function createVaultStore(rootDir: string): VaultStore {
   }
   const observedHashes = new Map<string, string | null>();
   const hash = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
+  async function ensureCategoryDirectory(type: (typeof MEMORY_TYPES)[number]): Promise<string> {
+    const dir = resolve(root, type);
+    await checked(dir);
+    try { await mkdir(dir); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    const info = await lstat(dir);
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`Unsupported memory category directory: ${type}`);
+    return dir;
+  }
   return {
     async readAll(): Promise<MemoryRecord[]> {
       const records: MemoryRecord[] = [];
       const hashes = new Map<string, string>();
-      async function visit(dir: string): Promise<void> {
-        await checked(dir);
+      for (const type of MEMORY_TYPES) {
+        const dir = resolve(root, type);
         let entries;
-        try { entries = await readdir(dir, { withFileTypes: true }); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT" && dir === root) return; throw error; }
+        try {
+          await checked(dir);
+          if ((await lstat(dir)).isSymbolicLink()) throw new Error(`Unsupported symlink in vault: ${type}`);
+          entries = await readdir(dir, { withFileTypes: true });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw error;
+        }
         for (const entry of entries) {
+          if (!isMemoryNoteFilename(entry.name)) continue;
           const path = resolve(dir, entry.name);
           await checked(path);
-          if (entry.isSymbolicLink()) throw new Error(`Unsupported symlink in vault: ${entry.name}`);
-          if (entry.isDirectory()) await visit(path);
-          else if (entry.isFile() && entry.name.endsWith(".md")) {
-            const bytes = await readFile(path);
-            records.push(parseMemoryNote(bytes.toString("utf8")));
-            hashes.set(path, hash(bytes));
+          if (entry.isSymbolicLink() || !entry.isFile()) {
+            throw new Error(`Unsupported memory note entry: ${entry.name}`);
           }
+          const bytes = await readFile(path);
+          records.push(parseMemoryNote(bytes.toString("utf8")));
+          hashes.set(path, hash(bytes));
         }
       }
-      await visit(root);
       for (const path of observedHashes.keys()) if (!hashes.has(path)) observedHashes.set(path, null);
       for (const [path, contentHash] of hashes) observedHashes.set(path, contentHash);
       return records;
     },
     async write(record: MemoryRecord, expectedContentHash?: string): Promise<"created" | "updated" | "conflict"> {
       const markdown = serializeMemoryNote(record);
-      const path = await checked(resolve(root, record.type, `${record.id}.md`));
-      await mkdir(dirname(path), { recursive: true });
-      await checked(path);
+      const dir = await ensureCategoryDirectory(record.type);
+      const path = await checked(resolve(dir, `${record.id}.md`));
       const observedHash = expectedContentHash ?? observedHashes.get(path);
       let old: Buffer | undefined;
       try { old = await readFile(path); }
